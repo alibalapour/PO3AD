@@ -87,8 +87,11 @@ def eval_fn(batch, model):
     feat_voxel = batch['feat_voxel']
     v2p_index = batch['v2p_index']
 
+    # So, the model get voxel features and positions as well as the point to voxel index to calculate offset for all points
     with torch.no_grad():
         pred_offset = model.test_inference(feat_voxel, xyz_voxel, v2p_index)
+
+    # The anomaly score is the mean of sum of xyz absolute offset
     sample_score = torch.mean(torch.sum(torch.abs(pred_offset.detach().cpu()), dim=-1))
 
     return sample_score, pred_offset
