@@ -62,6 +62,7 @@ def model_fn(batch, model, cfg):
     pt_dist = torch.sum(torch.abs(pt_diff), dim=-1)  # [N]    float32  :sum l1
     valid = torch.ones(pt_dist.shape[0]).cuda()  # # get valid num
     offset_norm_loss = torch.sum(pt_dist * valid) / (torch.sum(valid) + 1e-6)  # # avg
+    # offset_norm_loss is equal to L_dist (eq 1 of PO3AD paper)
 
     gt_offsets_norm = torch.norm(gt_offsets, p=2, dim=1)  # [N]    float32  :norm
     gt_offsets_ = gt_offsets / (gt_offsets_norm.unsqueeze(-1) + 1e-8)  # [N, 3] float32  :unit vector
@@ -69,6 +70,8 @@ def model_fn(batch, model, cfg):
     pt_offsets = pred_offset / (pt_offsets_norm.unsqueeze(-1) + 1e-8)  # [N, 3] float32  :unit vector
     direction_diff = - (gt_offsets_ * pt_offsets).sum(-1)  # [N]    float32  :direction diff (cos)
     offset_dir_loss = torch.sum(direction_diff * valid) / (torch.sum(valid) + 1e-6)  # # avg
+    # offset_dir_loss is equal to L_dir (eq 1 of PO3AD paper)
+    
     loss = offset_norm_loss + offset_dir_loss
 
     with torch.no_grad():
