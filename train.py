@@ -11,6 +11,9 @@ from tensorboardX import SummaryWriter
 import tools.log as log
 from config.config_train import get_parser
 
+from datasets.AnomalyShapeNet.dataset_preprocess import shared_cfg
+
+
 # Epoch counts from 0 to N-1
 def cosine_lr_after_step(optimizer, base_lr, epoch, step_epoch, total_epochs, clip=1e-6):
     if epoch < step_epoch:
@@ -31,6 +34,15 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
     end_time = time.time()  # initialization
     am_dict = {}
 
+
+    if epoch > 2:
+        epoch_frame = {
+            'move'   : 1,
+            'p_apply': 2,
+            'mode'   : 'inflate' if epoch < 8 else 'deflate',
+        }
+        shared_cfg['frame'] = epoch_frame  # single atomic-ish write
+    
     # #start train
     for i, batch in enumerate(train_loader):
         torch.cuda.empty_cache()

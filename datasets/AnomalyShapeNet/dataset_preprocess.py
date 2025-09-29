@@ -13,6 +13,150 @@ import os
 import re
 
 
+
+
+
+from eval import save_pc_plotly_html
+DEBUG = False
+
+
+
+
+# To inject params into dataloader workers
+import multiprocessing as mp
+
+manager = mp.Manager()
+# single "frame" key to avoid multi-key tearing (atomic-ish snapshot)
+shared_cfg = manager.dict({
+    'frame': {'move': 0.08, 'p_apply': 1.0, 'mode': 'inflate'}
+})
+
+
+def make_collate(self, shared_cfg):
+    def trainMerge_with_cfg(id_list):        # Snapshot once per batch
+        frame = shared_cfg.get('frame', {'move': 0.08, 'p_apply': 1.0, 'mode': 'inflate'})
+        move = float(frame['move'])
+        p_apply = float(frame['p_apply'])
+        mode = frame['mode']
+        print(f"Using shared_cfg: move={move}, p_apply={p_apply}, mode={mode}")
+        file_name = []
+        xyz_voxel = []
+        feat_voxel = []
+        xyz_original = []
+        xyz_shifted = []
+        v2p_index_batch = []
+        total_voxel_num = 0
+        batch_count = [0]
+        total_point_num = 0
+        gt_offset_list = []
+        for i, idx in enumerate(id_list):
+            fn_path = self.train_file_list[idx]  # get path
+            file_name.append(self.train_file_list[idx])
+
+            # #####Load data
+            obj = o3d.io.read_triangle_mesh(fn_path)
+            obj.compute_vertex_normals()
+            coord = np.asarray(obj.vertices)
+            vertex_normals = np.asarray(obj.vertex_normals)
+            mask = np.ones(coord.shape[0]) * -1
+
+            # ####Data aug
+            Point_dict = {'coord': coord,
+                          'normal': vertex_normals, 'mask': mask}
+            Point_dict, centers = self.train_aug_compose(Point_dict)
+
+            # ####Trans to numpy
+            xyz = Point_dict['coord'].astype(np.float32)
+            normal = Point_dict['normal'].astype(np.float32)
+            mask = Point_dict['mask'].astype(np.int32)
+
+            # ensure that the mask label is between 0 to self.mask_num-1
+            mask[mask == (self.mask_num + 1)] = self.mask_num - 1
+
+            xyz_original.append(torch.from_numpy(xyz))
+
+            # ####Generate pseudo anomaly
+
+            # Select random regions to create pseudo anomalies by shifting points within those regions.
+            num_shift = 1
+            mask_range = np.arange(0, self.mask_num // 2)
+
+            # Randomly selects regions from the first half of the mask indices to create pseudo anomalies.
+            shift_index = np.random.choice(
+                mask_range, num_shift, replace=False)
+
+            # Updates the mask to mark the selected regions for shifting with -1.
+            mask[np.isin(mask, shift_index)] = -1
+
+            # Generate pseudo anomaly by shifting the points in the selected mask regions
+            shift_xyz = xyz[mask == -1].copy()
+            shift_normal = normal[mask == -1].copy()
+            shifted_xyz = self.generate_pseudo_anomaly(
+                shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
+
+            new_xyz = xyz.copy()
+
+            new_xyz[mask == -1] = shifted_xyz
+
+            # Calculate the ground truth offset between the original and shifted point clouds
+            gt_offset = new_xyz - xyz
+            gt_offset_list.append(torch.from_numpy(gt_offset))
+
+            # if DEBUG:
+            #     save_pc_plotly_html(new_xyz, gt_offset.sum(
+            #         axis=-1), f'debug/shifted_{i}.html')
+            #     print(
+            #         "*"*20, *f"Saved shifted points visualization to debug/shifted_{i}.html")
+
+            xyz_shifted.append(torch.from_numpy(new_xyz))
+
+            # ####Voxelization
+            quantized_coords, feats_all, index, inverse_index = ME.utils.sparse_quantize(new_xyz, new_xyz,
+                                                                                         quantization_size=self.voxel_size,
+                                                                                         return_index=True,
+                                                                                         return_inverse=True)
+
+            # Calculate voxel to point mapping
+            v2p_index = inverse_index + total_voxel_num
+            total_voxel_num = total_voxel_num + index.shape[0]
+
+            total_point_num += inverse_index.shape[0]
+            batch_count.append(total_point_num)
+
+            # -------------------------------Batch -------------------------
+            #  merge the scene to the batch
+            xyz_voxel.append(quantized_coords)
+            feat_voxel.append(feats_all)
+            v2p_index_batch.append(v2p_index)
+        # ####numpy to torch
+
+        # Collates the voxelized coordinates and features into a batch using MinkowskiEngine's sparse_collate function.
+        xyz_voxel_batch, feat_voxel_batch = ME.utils.sparse_collate(
+            xyz_voxel, feat_voxel)
+
+        # Concatenates the original point clouds from all samples in the batch into a single tensor.
+        xyz_original = torch.cat(xyz_original, 0).to(torch.float32)
+
+        # Concatenates the shifted point clouds from all samples in the batch into a single tensor.
+        xyz_shifted = torch.cat(xyz_shifted, 0).to(torch.float32)
+
+        # Concatenates the voxel-to-point index mappings from all samples in the batch into a single tensor.
+        v2p_index_batch = torch.cat(v2p_index_batch, 0).to(torch.int64)
+
+        # Converts the batch count list to a PyTorch tensor.
+        batch_count = torch.from_numpy(np.array(batch_count))
+
+        # Concatenates the ground truth offsets from all samples in the batch into a single tensor.
+        batch_offset = torch.cat(gt_offset_list, 0).to(torch.float32)
+
+        return {'xyz_voxel': xyz_voxel_batch, 'feat_voxel': feat_voxel_batch, 'xyz_original': xyz_original,
+                'fn': file_name, 'v2p_index': v2p_index_batch, 'xyz_shifted': xyz_shifted, 'batch_count': batch_count, 'batch_offset': batch_offset}
+    return trainMerge_with_cfg
+
+
+
+
+
 class Dataset:
     def __init__(self, cfg):
         self.batch_size = cfg.batch_size
@@ -67,12 +211,17 @@ class Dataset:
         # Creates training dataset indecies.
         train_set = list(range(len(self.train_file_list)))
 
-        # Initializes the training data loader with the specified parameters and custom collate function. Note that collate_fn is a custom function (self.trainMerge) to merge and preprocess data for each batch.
-        self.train_data_loader = DataLoader(train_set, batch_size=self.batch_size, collate_fn=self.trainMerge,
-                                            num_workers=self.dataset_workers,
-                                            shuffle=True, sampler=None,
-                                            drop_last=True, pin_memory=False,
-                                            worker_init_fn=self._worker_init_fn_)
+        self.train_data_loader = DataLoader(
+            train_set,
+            batch_size=self.batch_size,
+            collate_fn=make_collate(self, shared_cfg),
+            num_workers=self.dataset_workers,
+            shuffle=True,
+            drop_last=True,
+            pin_memory=False,
+            worker_init_fn=self._worker_init_fn_,
+            persistent_workers=True  # recommended for speed; safe with Manager proxy
+        )
 
     def testLoader(self):
         # Creates test dataset indecies.
@@ -175,6 +324,12 @@ class Dataset:
             gt_offset = new_xyz - xyz
             gt_offset_list.append(torch.from_numpy(gt_offset))
 
+            # if DEBUG:
+            #     save_pc_plotly_html(new_xyz, gt_offset.sum(
+            #         axis=-1), f'debug/shifted_{i}.html')
+            #     print(
+            #         "*"*20, *f"Saved shifted points visualization to debug/shifted_{i}.html")
+
             xyz_shifted.append(torch.from_numpy(new_xyz))
 
             # ####Voxelization
@@ -195,7 +350,6 @@ class Dataset:
             xyz_voxel.append(quantized_coords)
             feat_voxel.append(feats_all)
             v2p_index_batch.append(v2p_index)
-
         # ####numpy to torch
 
         # Collates the voxelized coordinates and features into a batch using MinkowskiEngine's sparse_collate function.

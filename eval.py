@@ -46,8 +46,6 @@ def save_anomalies_visualization(batch, pred_mask, gt_mask=None, output_dir="vis
         output_dir (str): Directory to save the visualizations.
         file_prefix (str): Prefix for the output file names.
     """
-    import os
-
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -198,11 +196,11 @@ def eval(cfgs):
         pred_masks.append(pred_mask)
         label_score += list(zip(batch['labels'].numpy().tolist(),
                             [score.item()]))
-        print("*"*20), print(f'[{i}/{len(dataset.test_file_list)}] {batch["fn"][0]} | label: {batch["labels"].numpy()[0]} | score: {score.item()}, | pred mask: {pred_mask}'), print("*"*20)
-        save_anomalies_visualization(
-            batch, pred_mask, gt_mask, output_dir="results", file_prefix="test_sample", counter=i)
-        save_anomalies_visualization_html(
-            batch, pred_mask, gt_mask, output_dir="results_html", file_prefix="test_sample", counter=i)
+        # print("*"*20), print(f'[{i}/{len(dataset.test_file_list)}] {batch["fn"][0]} | label: {batch["labels"].numpy()[0]} | score: {score.item()}, | pred mask: {pred_mask}'), print("*"*20)
+        # save_anomalies_visualization(
+        #     batch, pred_mask, gt_mask, output_dir="results", file_prefix="test_sample", counter=i)
+        # save_anomalies_visualization_html(
+        #     batch, pred_mask, gt_mask, output_dir="results_html", file_prefix="test_sample", counter=i)
 
     labels, scores = zip(*label_score)
     labels = np.array(labels)
