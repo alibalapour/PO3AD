@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import math
 import glob
 import torch
@@ -13,32 +14,28 @@ import os
 import re
 
 
-
-
-
 from eval import save_pc_plotly_html
 DEBUG = False
 
 
-
-
 # To inject params into dataloader workers
-import multiprocessing as mp
 
 manager = mp.Manager()
 # single "frame" key to avoid multi-key tearing (atomic-ish snapshot)
 shared_cfg = manager.dict({
-    'frame': {'move': 0.08, 'p_apply': 1.0, 'mode': 'inflate'}
+    'frame': {'beta': 0.08}
 })
 
+# Contribution: Writing dataloader collate function as a closure to capture shared config that can be modified externally through training loop, without any signi
 
-def make_collate(self, shared_cfg):
+
+def make_collate(dataset_object, shared_cfg):
     def trainMerge_with_cfg(id_list):        # Snapshot once per batch
-        frame = shared_cfg.get('frame', {'move': 0.08, 'p_apply': 1.0, 'mode': 'inflate'})
-        move = float(frame['move'])
-        p_apply = float(frame['p_apply'])
-        mode = frame['mode']
-        print(f"Using shared_cfg: move={move}, p_apply={p_apply}, mode={mode}")
+        frame = shared_cfg.get(
+            'frame', {'beta': 0.08})   # default valuem if 'frame' is missing
+        beta = float(frame['beta'])
+        # print(f"Using shared_cfg: beta={beta}")      # JUST FOR TEST
+
         file_name = []
         xyz_voxel = []
         feat_voxel = []
@@ -50,8 +47,8 @@ def make_collate(self, shared_cfg):
         total_point_num = 0
         gt_offset_list = []
         for i, idx in enumerate(id_list):
-            fn_path = self.train_file_list[idx]  # get path
-            file_name.append(self.train_file_list[idx])
+            fn_path = dataset_object.train_file_list[idx]  # get path
+            file_name.append(dataset_object.train_file_list[idx])
 
             # #####Load data
             obj = o3d.io.read_triangle_mesh(fn_path)
@@ -63,15 +60,16 @@ def make_collate(self, shared_cfg):
             # ####Data aug
             Point_dict = {'coord': coord,
                           'normal': vertex_normals, 'mask': mask}
-            Point_dict, centers = self.train_aug_compose(Point_dict)
+            Point_dict, centers = dataset_object.train_aug_compose(Point_dict)
 
             # ####Trans to numpy
             xyz = Point_dict['coord'].astype(np.float32)
             normal = Point_dict['normal'].astype(np.float32)
             mask = Point_dict['mask'].astype(np.int32)
 
-            # ensure that the mask label is between 0 to self.mask_num-1
-            mask[mask == (self.mask_num + 1)] = self.mask_num - 1
+            # ensure that the mask label is between 0 to dataset_object.mask_num-1
+            mask[mask == (dataset_object.mask_num + 1)
+                 ] = dataset_object.mask_num - 1
 
             xyz_original.append(torch.from_numpy(xyz))
 
@@ -79,7 +77,7 @@ def make_collate(self, shared_cfg):
 
             # Select random regions to create pseudo anomalies by shifting points within those regions.
             num_shift = 1
-            mask_range = np.arange(0, self.mask_num // 2)
+            mask_range = np.arange(0, dataset_object.mask_num // 2)
 
             # Randomly selects regions from the first half of the mask indices to create pseudo anomalies.
             shift_index = np.random.choice(
@@ -91,7 +89,7 @@ def make_collate(self, shared_cfg):
             # Generate pseudo anomaly by shifting the points in the selected mask regions
             shift_xyz = xyz[mask == -1].copy()
             shift_normal = normal[mask == -1].copy()
-            shifted_xyz = self.generate_pseudo_anomaly(
+            shifted_xyz = dataset_object.generate_pseudo_anomaly(
                 shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
 
             new_xyz = xyz.copy()
@@ -112,7 +110,7 @@ def make_collate(self, shared_cfg):
 
             # ####Voxelization
             quantized_coords, feats_all, index, inverse_index = ME.utils.sparse_quantize(new_xyz, new_xyz,
-                                                                                         quantization_size=self.voxel_size,
+                                                                                         quantization_size=dataset_object.voxel_size,
                                                                                          return_index=True,
                                                                                          return_inverse=True)
 
@@ -152,9 +150,6 @@ def make_collate(self, shared_cfg):
         return {'xyz_voxel': xyz_voxel_batch, 'feat_voxel': feat_voxel_batch, 'xyz_original': xyz_original,
                 'fn': file_name, 'v2p_index': v2p_index_batch, 'xyz_shifted': xyz_shifted, 'batch_count': batch_count, 'batch_offset': batch_offset}
     return trainMerge_with_cfg
-
-
-
 
 
 class Dataset:
@@ -235,7 +230,7 @@ class Dataset:
                                            worker_init_fn=self._worker_init_fn_)
 
     def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08):
-        
+
         # Find distance of each point to the center
         distances_to_center = np.linalg.norm(points - center, axis=1)
 

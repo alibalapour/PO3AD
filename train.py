@@ -1,4 +1,5 @@
-import os, sys
+import os
+import sys
 import time
 import random
 import torch
@@ -19,7 +20,8 @@ def cosine_lr_after_step(optimizer, base_lr, epoch, step_epoch, total_epochs, cl
     if epoch < step_epoch:
         lr = base_lr
     else:
-        lr = clip + 0.5 * (base_lr - clip) * (1 + cos(pi * ((epoch - step_epoch) / (total_epochs - step_epoch))))
+        lr = clip + 0.5 * (base_lr - clip) * (1 + cos(pi *
+                                                      ((epoch - step_epoch) / (total_epochs - step_epoch))))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -34,21 +36,20 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
     end_time = time.time()  # initialization
     am_dict = {}
 
-
-    if epoch > 2:
+    # Where to change the anomaly synthetisis parameters
+    if epoch >= 0:
         epoch_frame = {
-            'move'   : 1,
-            'p_apply': 2,
-            'mode'   : 'inflate' if epoch < 8 else 'deflate',
+            'beta': np.random.uniform(0.06, 0.12)
         }
         shared_cfg['frame'] = epoch_frame  # single atomic-ish write
-    
+
     # #start train
     for i, batch in enumerate(train_loader):
         torch.cuda.empty_cache()
         batch_time.update(time.time() - end_time)  # update time
 
-        cosine_lr_after_step(optimizer, cfg.lr, epoch, cfg.step_epoch, cfg.epochs, clip=1e-6)  # adjust lr
+        cosine_lr_after_step(optimizer, cfg.lr, epoch,
+                             cfg.step_epoch, cfg.epochs, clip=1e-6)  # adjust lr
         loss, _, visual_dict, meter_dict = model_fn(batch, model, cfg)
 
         # # backward
@@ -70,14 +71,16 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
         remain_time = remain_iter * iter_time.avg
         t_m, t_s = divmod(remain_time, 60)
         t_h, t_m = divmod(t_m, 60)
-        remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
+        remain_time = '{:02d}:{:02d}:{:02d}'.format(
+            int(t_h), int(t_m), int(t_s))
         sys.stdout.write("epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f})  data_time: {:.2f}({:.2f}) "
                          "iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n"
                          .format(epoch, cfg.epochs, i + 1, len(train_loader), am_dict['loss'].val,
                                  am_dict['loss'].avg,
                                  batch_time.val, batch_time.avg, iter_time.val, iter_time.avg,
                                  remain_time=remain_time))
-        if (i == len(train_loader) - 1): print()
+        if (i == len(train_loader) - 1):
+            print()
 
     logger.info("epoch: {}/{}, train loss: {:.4f},  time: {}s".format(epoch, cfg.epochs, am_dict['loss'].avg,
                                                                       time.time() - start_time))
@@ -89,9 +92,11 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
             writer.add_scalar('train/learning_rate', lr, epoch)
 
     # save pretrained model
-    pretrain_file = log.checkpoint_save_newest(model, optimizer, cfg.logpath, epoch, cfg.save_freq)
+    pretrain_file = log.checkpoint_save_newest(
+        model, optimizer, cfg.logpath, epoch, cfg.save_freq)
     logger.info('Saving {}'.format(pretrain_file))
     pass
+
 
 def SingleCard_training(cfgs):
     global cfg
@@ -113,11 +118,13 @@ def SingleCard_training(cfgs):
     model = net(cfg.in_channels, cfg.out_channels)
     model = model.cuda()
 
-    logger.info('#Model parameters: {}'.format(sum([x.nelement() for x in model.parameters()])))
+    logger.info('#Model parameters: {}'.format(
+        sum([x.nelement() for x in model.parameters()])))
 
     #  #optimizer
     if cfg.optimizer == 'Adam':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr)
+        optimizer = optim.Adam(
+            filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr)
     elif cfg.optimizer == 'SGD':
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr,
                               momentum=cfg.momentum, weight_decay=cfg.weight_decay)
@@ -140,16 +147,15 @@ def SingleCard_training(cfgs):
 
     # #train
     cfg.pretrain = ''  # Automatically identify breakpoints
-    start_epoch, pretrain_file = log.checkpoint_restore(model, None, cfg.logpath, pretrain_file=cfg.pretrain)
+    start_epoch, pretrain_file = log.checkpoint_restore(
+        model, None, cfg.logpath, pretrain_file=cfg.pretrain)
     logger.info('Restore from {}'.format(pretrain_file) if len(pretrain_file) > 0
                 else 'Start from epoch {}'.format(start_epoch))
 
     for epoch in range(start_epoch, cfg.epochs):
-        train_epoch(dataset.train_data_loader, model, model_fn, optimizer, epoch, max_batch_iter)
+        train_epoch(dataset.train_data_loader, model,
+                    model_fn, optimizer, epoch, max_batch_iter)
     pass
-
-
-
 
 
 if __name__ == '__main__':
