@@ -7,7 +7,7 @@ def get_parser():
     parser = argparse.ArgumentParser(description='3D anomaly detection')
     parser.add_argument('--task', type=str, default='train', help='task: train or test')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
-    parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
+    parser.add_argument('--epochs', type=int, default=501, help='Total epoch')
     parser.add_argument('--num_works', type=int, default=12, help='num_works for dataset')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
