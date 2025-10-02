@@ -32,7 +32,8 @@ def load_checkpoint(model, pretrain_file, gpu=0):
         if 'module.' in k:
             model_dict = {k[len('module.'):]: v for k, v in model_dict.items()}
         break
-    model.load_state_dict(model_dict, strict=False)
+    msg = model.load_state_dict(model_dict, strict=False)
+    print(msg)
 
 
 def save_anomalies_visualization(batch, pred_mask, gt_mask=None, output_dir="visualizations", file_prefix="sample", counter=0):

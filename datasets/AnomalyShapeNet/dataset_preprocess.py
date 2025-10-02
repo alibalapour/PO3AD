@@ -31,9 +31,15 @@ shared_cfg = manager.dict({
 
 def make_collate(dataset_object, shared_cfg):
     def trainMerge_with_cfg(id_list):        # Snapshot once per batch
+        
+        w = torch.utils.data.get_worker_info()
+        worker_id = w.id if w is not None else -1
+        
+        
         frame = shared_cfg.get(
-            'frame', {'beta': 0.08})   # default valuem if 'frame' is missing
-        beta = float(frame['beta'])
+            'frame', {'beta': [0.08]*w.num_workers})   # default valuem if 'frame' is missing
+        beta = float(frame['beta'][worker_id])
+        
         # print(f"Using shared_cfg: beta={beta}")      # JUST FOR TEST
 
         file_name = []
@@ -89,8 +95,10 @@ def make_collate(dataset_object, shared_cfg):
             # Generate pseudo anomaly by shifting the points in the selected mask regions
             shift_xyz = xyz[mask == -1].copy()
             shift_normal = normal[mask == -1].copy()
+            # shifted_xyz = dataset_object.generate_pseudo_anomaly(
+            #     shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
             shifted_xyz = dataset_object.generate_pseudo_anomaly(
-                shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
+                shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=beta)
 
             new_xyz = xyz.copy()
 
@@ -100,11 +108,11 @@ def make_collate(dataset_object, shared_cfg):
             gt_offset = new_xyz - xyz
             gt_offset_list.append(torch.from_numpy(gt_offset))
 
-            # if DEBUG:
-            #     save_pc_plotly_html(new_xyz, gt_offset.sum(
-            #         axis=-1), f'debug/shifted_{i}.html')
-            #     print(
-            #         "*"*20, *f"Saved shifted points visualization to debug/shifted_{i}.html")
+            if DEBUG:
+                save_pc_plotly_html(new_xyz, gt_offset.sum(
+                    axis=-1), f'debug/shifted_{i}.html')
+                print(
+                    "*"*20, *f"Saved shifted points visualization to debug/shifted_{i}.html")
 
             xyz_shifted.append(torch.from_numpy(new_xyz))
 
@@ -230,7 +238,9 @@ class Dataset:
                                            worker_init_fn=self._worker_init_fn_)
 
     def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08):
-
+        # print(np.random.seed())
+        # print(np)
+        print(f"distance_to_move: {distance_to_move}")
         # Find distance of each point to the center
         distances_to_center = np.linalg.norm(points - center, axis=1)
 

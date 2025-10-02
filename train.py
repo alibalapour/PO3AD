@@ -39,7 +39,7 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
     # Where to change the anomaly synthetisis parameters
     if epoch >= 0:
         epoch_frame = {
-            'beta': np.random.uniform(0.06, 0.12)
+            'beta': np.random.uniform(0.06, 0.12, cfg.num_works)
         }
         shared_cfg['frame'] = epoch_frame  # single atomic-ish write
 
