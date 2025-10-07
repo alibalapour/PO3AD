@@ -7,7 +7,7 @@ def get_parser():
     parser = argparse.ArgumentParser(description='3D anomaly detection')
     parser.add_argument('--task', type=str, default='train', help='task: train or test')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
-    parser.add_argument('--epochs', type=int, default=501, help='Total epoch')
+    parser.add_argument('--epochs', type=int, default=151, help='Total epoch')
     parser.add_argument('--num_works', type=int, default=12, help='num_works for dataset')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
@@ -19,12 +19,12 @@ def get_parser():
     parser.add_argument('--dataset', type=str, default='AnomalyShapeNet', help='datasets')
     parser.add_argument('--category', type=str, default='ashtray0', help='categories for each class')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size for single GPU')
-    parser.add_argument('--data_repeat', type=int, default=100, help='repeat the date for each epoch')
+    parser.add_argument('--data_repeat', type=int, default=300, help='repeat the date for each epoch')
     parser.add_argument('--mask_num', type=int, default=64)
 
     # #Adjust learning rate
-    parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
-    parser.add_argument('--optimizer', type=str, default='Adam', help='Optimizer: Adam, SGD, AdamW')
+    parser.add_argument('--lr', default=0.003, type=float, help='learning rate')
+    parser.add_argument('--optimizer', type=str, default='AdamW', help='Optimizer: Adam, SGD, AdamW')
     parser.add_argument('--step_epoch', type=int, default=10, help='How many steps apart to decay the learning rate')
     parser.add_argument('--multiplier', type=float, default=0.5, help='Learning rate decay: lr = lr * multiplier')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum for SGD')
@@ -35,6 +35,7 @@ def get_parser():
     parser.add_argument('--in_channels', type=int, default=3, help='in channels')
     parser.add_argument('--out_channels', type=int, default=32, help='backbone feat channels')
 
+    parser.add_argument('--smart_anomaly', default=False, action='store_true', help='Whether to use smart anomaly')
 
     args = parser.parse_args()
     return args

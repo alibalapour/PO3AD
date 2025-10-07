@@ -13,6 +13,12 @@ import datasets.AnomalyShapeNet.transform as aug_transform
 import os
 import re
 
+import numpy as np
+from dataclasses import dataclass
+import open3d as o3d
+import MinkowskiEngine as ME
+import torch
+
 
 from eval import save_pc_plotly_html
 DEBUG = False
@@ -21,26 +27,56 @@ DEBUG = False
 # To inject params into dataloader workers
 
 manager = mp.Manager()
-# single "frame" key to avoid multi-key tearing (atomic-ish snapshot)
-shared_cfg = manager.dict({
-    'frame': {'beta': 0.08}
-})
+param_queue = manager.Queue()
+
 
 # Contribution: Writing dataloader collate function as a closure to capture shared config that can be modified externally through training loop, without any signi
 
 
-def make_collate(dataset_object, shared_cfg):
-    def trainMerge_with_cfg(id_list):        # Snapshot once per batch
-        
-        w = torch.utils.data.get_worker_info()
-        worker_id = w.id if w is not None else -1
-        
-        
-        frame = shared_cfg.get(
-            'frame', {'beta': [0.08]*w.num_workers})   # default valuem if 'frame' is missing
-        beta = float(frame['beta'][worker_id])
-        
-        # print(f"Using shared_cfg: beta={beta}")      # JUST FOR TEST
+@dataclass
+class SmartAnomaly_Cfg:
+    # size & strength
+    R: float = None            # support radius; None -> 0.2 * object diameter
+    beta: float = 0.08                # magnitude (your distance_to_move)
+    alpha: int = None          # +1 bulge, -1 cavity, None -> random w.p. p_bulge
+    p_bulge: float = 0.5
+
+    # falloff kernel
+    kernel: str = "cosine"            # {"cosine","gaussian","poly","hard"}
+    q: float = 2.0
+    sigma: float = 0.35               # as fraction of R for gaussian
+
+    # anisotropy (ellipsoid radii along local frame axes)
+    radii: tuple = (1.0, 1.0, 1.0)    # (ru, rv, rn); 1,1,1 == sphere
+
+    # displacement direction
+    # {"normal_point","normal_mean","tangent_u","tangent_v"}
+    dir_mode: str = "normal_point"
+
+    # extras
+    # 0..1 probability of removing center points (holes)
+    carve_strength: float = 0.0
+    smooth_steps: int = 0             # Laplacian smoothing steps inside support
+    smooth_lambda: float = 0.15
+    seed: int = None
+
+
+def make_collate(dataset_object, param_queue):
+    import queue as _queue
+
+    def trainMerge_with_anomlay_cfg(id_list):        # Snapshot once per batch
+
+        # w = torch.utils.data.get_worker_info()
+        # worker_id = w.id if w is not None else -1
+
+        # Getting parameters of pseudo anomlay synthesis from a queue during training
+        default_beta = 0.08
+        queue_timeout = 1.0
+        try:
+            params = param_queue.get(timeout=queue_timeout)
+        except _queue.Empty:
+            params = {'beta': default_beta}
+        beta = float(params.get('beta', default_beta))
 
         file_name = []
         xyz_voxel = []
@@ -97,8 +133,16 @@ def make_collate(dataset_object, shared_cfg):
             shift_normal = normal[mask == -1].copy()
             # shifted_xyz = dataset_object.generate_pseudo_anomaly(
             #     shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
-            shifted_xyz = dataset_object.generate_pseudo_anomaly(
-                shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=beta)
+
+            anomlay_cfg, R_frac = dataset_object.sample_anomlay_cfg(np.random.default_rng())
+            
+            if dataset_object.global_cfg.smart_anomaly:
+                shifted_xyz = dataset_object.generate_pseudo_anomaly(
+                    shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=beta,
+                    anomlay_cfg=anomlay_cfg)
+            else:
+                shifted_xyz = dataset_object.generate_pseudo_anomaly_original(
+                    shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=beta)
 
             new_xyz = xyz.copy()
 
@@ -157,11 +201,12 @@ def make_collate(dataset_object, shared_cfg):
 
         return {'xyz_voxel': xyz_voxel_batch, 'feat_voxel': feat_voxel_batch, 'xyz_original': xyz_original,
                 'fn': file_name, 'v2p_index': v2p_index_batch, 'xyz_shifted': xyz_shifted, 'batch_count': batch_count, 'batch_offset': batch_offset}
-    return trainMerge_with_cfg
+    return trainMerge_with_anomlay_cfg
 
 
 class Dataset:
     def __init__(self, cfg):
+        self.global_cfg = cfg
         self.batch_size = cfg.batch_size
         self.dataset_workers = cfg.num_works
         self.data_repeat = cfg.data_repeat
@@ -217,13 +262,14 @@ class Dataset:
         self.train_data_loader = DataLoader(
             train_set,
             batch_size=self.batch_size,
-            collate_fn=make_collate(self, shared_cfg),
+            collate_fn=make_collate(self, param_queue),
             num_workers=self.dataset_workers,
             shuffle=True,
             drop_last=True,
             pin_memory=False,
             worker_init_fn=self._worker_init_fn_,
-            persistent_workers=True  # recommended for speed; safe with Manager proxy
+            persistent_workers=True,  # recommended for speed; safe with Manager proxy
+            prefetch_factor=1,               # important: one batch prefetched per worker
         )
 
     def testLoader(self):
@@ -237,10 +283,11 @@ class Dataset:
                                            drop_last=False, pin_memory=False,
                                            worker_init_fn=self._worker_init_fn_)
 
-    def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08):
-        # print(np.random.seed())
-        # print(np)
-        print(f"distance_to_move: {distance_to_move}")
+
+    def generate_pseudo_anomaly_original(self, points, normals, center, distance_to_move=0.08):
+
+        # print(f"distance_to_move: {distance_to_move}")
+
         # Find distance of each point to the center
         distances_to_center = np.linalg.norm(points - center, axis=1)
 
@@ -262,6 +309,173 @@ class Dataset:
 
         # Moves the points along their normals by the calculated movements
         new_points = points + np.abs(normals) * movements[:, np.newaxis]
+
+        return new_points
+
+    # -------- Helpers --------
+
+    def _kernel(self, t, kind="cosine", q=2.0, sigma=0.35):
+        """t is normalized distance; returns falloff in [0,1]."""
+        t = np.clip(t, 0.0, None)
+        if kind == "cosine":                    # smooth spherical cap
+            x = np.clip(t, 0.0, 1.0)
+            return 0.5 * (1 + np.cos(np.pi * x))
+        if kind == "gaussian":                  # compact-ish, smooth
+            return np.exp(-(t**2) / (2 * (sigma**2)))
+        if kind == "poly":                      # (1 - t^q)+
+            return np.clip(1.0 - t**q, 0.0, 1.0)
+        if kind == "hard":                      # hard support
+            return (t < 1.0).astype(t.dtype if hasattr(t, "dtype") else np.float32)
+        raise ValueError(f"Unknown kernel: {kind}")
+
+    def _local_frame(self, points, center, k=64):
+        """PCA frame around center: columns ~ (tangent_u, tangent_v, normal)."""
+        d = np.linalg.norm(points - center, axis=1)
+        idx = np.argsort(d)[:k]
+        Q = points[idx] - points[idx].mean(0)
+        C = Q.T @ Q / max(len(idx)-1, 1)
+        w, V = np.linalg.eigh(C)
+        V = V[:, np.argsort(w)[::-1]]   # sort desc
+        return V  # shape (3,3)
+
+    def _beta_sample(self, rng, a, b):
+        return rng.beta(a, b)
+
+    def _choose(self, rng, items, probs=None):
+        return items[rng.choice(len(items), p=probs)]
+
+    def sample_anomlay_cfg(self, rng: np.random.Generator) -> SmartAnomaly_Cfg:
+        # Discrete choices (minimal action set)
+        kernel = self._choose(rng, ["cosine", "gaussian", "poly", "hard"], probs=[
+                              0.4, 0.4, 0.1, 0.1])
+        dir_mode = self._choose(rng, ["normal_point", "normal_mean", "tangent_u", "tangent_v"], probs=[
+                                0.925, 0.025, 0.025, 0.025])
+        alpha = 1 if rng.random() < 0.5 else -1
+        # Smoothing: mostly 0, sometimes 1, rarely 2
+        smooth_steps = rng.choice([0, 1, 2], p=[0.7, 0.25, 0.05])
+
+        # Continuous (Beta → range)
+        # R: fraction of diameter in ????
+        u_R = self._beta_sample(rng, 1, 1)
+        R_frac = 0.01 + (0.2 - 0.08) * u_R
+        # beta (strength) in ????
+        u_B = self._beta_sample(rng, 1, 1)
+        beta = 0.05 + (0.10 - 0.02) * u_B
+        # gaussian sigma in [0.20, 0.60]; used only if kernel=="gaussian"
+        u_S = self._beta_sample(rng, 1, 1)
+        sigma = 0.20 + (0.60 - 0.20) * u_S
+        # anisotropy e in [0.7, 1.8] → radii (e, 1/e, 1)
+        u_E = self._beta_sample(rng, 1, 1)
+        e = 0.70 + (1.80 - 0.70) * u_E
+        radii = (float(e), float(1.0 / e), 1.0)
+
+        # carve strength in [0, 0.4] (mostly small)
+        u_C = self._beta_sample(rng, 1, 12)
+        carve_strength = 0.0 + 0.40 * u_C
+        # smoothing lambda in [0.10, 0.25]
+        smooth_lambda = rng.uniform(0.10, 0.25)
+
+        return SmartAnomaly_Cfg(
+            R=None,                    # we’ll set absolute R from diameter below
+            beta=float(beta),
+            alpha=int(alpha),
+            p_bulge=0.5,
+            kernel=kernel,
+            q=2.0,
+            sigma=float(sigma),
+            radii=radii,
+            dir_mode=dir_mode,
+            carve_strength=float(carve_strength),
+            smooth_steps=int(smooth_steps),
+            smooth_lambda=float(smooth_lambda),
+            seed=int(rng.integers(0, 2**31 - 1))
+        ), R_frac
+
+    # -------- Smart synthesizer (drop-in) --------
+
+    def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08,
+                                anomlay_cfg=None):
+        """
+        Upgraded version of your function. Pass `anomlay_cfg` to enable smart behavior.
+        If `anomlay_cfg` is None, it behaves almost like your original (cosine cap, spherical).
+        """
+        # --- Defaults to preserve your old behavior ---
+        if anomlay_cfg is None:
+            anomlay_cfg = SmartAnomaly_Cfg(beta=distance_to_move)
+
+        # TODO
+        rng = np.random.default_rng(42)
+
+        P = points.astype(np.float32, copy=False)
+        N = normals.astype(np.float32, copy=False)
+        c = center.astype(np.float32, copy=False)
+
+        # Normalize normals softly; (your code used abs(normals) which kills direction)
+        nrm = np.linalg.norm(N, axis=1, keepdims=True) + 1e-12
+        N = N / nrm
+
+        # Determine radius
+        diam = float(np.linalg.norm(P.max(0) - P.min(0)))
+        R = anomlay_cfg.R if anomlay_cfg.R is not None else 0.2 * diam
+
+        # Local PCA frame for anisotropy & tangents
+        U = self._local_frame(P, c)  # columns: u, v, (approx) n
+        ru, rv, rn = anomlay_cfg.radii
+
+        # Coordinates in local frame and anisotropic distance
+        X = (P - c) @ U         # (N,3)
+        # Mahalanobis-like norm: t=1 on the ellipsoid surface
+        invQ = np.diag([1.0/((ru*R)+1e-12)**2,
+                        1.0/((rv*R)+1e-12)**2,
+                        1.0/((rn*R)+1e-12)**2])
+        t = np.sqrt(np.sum((X @ invQ) * X, axis=1))
+
+        # Falloff weights
+        w = self._kernel(t, anomlay_cfg.kernel, anomlay_cfg.q, anomlay_cfg.sigma)
+
+        # Direction field
+        if anomlay_cfg.dir_mode == "normal_point":
+            D = N
+        elif anomlay_cfg.dir_mode == "normal_mean":
+            D = np.repeat(U[:, 2][None, :], len(P), axis=0)
+        elif anomlay_cfg.dir_mode == "tangent_u":
+            D = np.repeat(U[:, 0][None, :], len(P), axis=0)
+        elif anomlay_cfg.dir_mode == "tangent_v":
+            D = np.repeat(U[:, 1][None, :], len(P), axis=0)
+        else:
+            raise ValueError(f"Unknown dir_mode: {anomlay_cfg.dir_mode}")
+
+        # Alpha (+1/-1)
+        alpha = anomlay_cfg.alpha
+        if alpha is None:
+            alpha = 1 if rng.random() < anomlay_cfg.p_bulge else -1
+
+        # Magnitude
+        beta = anomlay_cfg.beta if anomlay_cfg.beta is not None else distance_to_move
+        disp = (alpha * beta * w)[:, None] * D
+        new_points = P + disp
+
+        # # Optional carving (hole)
+        # keep_mask = np.ones(len(P), dtype=bool)
+        # if anomlay_cfg.carve_strength > 0.0:
+        #     # remove with prob rising toward center using (1 - t)^2 inside support
+        #     pr = anomlay_cfg.carve_strength * np.clip(1.0 - np.clip(t, 0, 1), 0, 1)**2
+        #     keep_mask = rng.random(len(P)) > pr
+        #     new_points = new_points[keep_mask]
+
+        # # Optional light Laplacian smoothing on the deformed region
+        # if anomlay_cfg.smooth_steps > 0:
+        #     sub_idx = np.where(w[keep_mask] > 0.01)[0]
+        #     if len(sub_idx) >= 8:
+        #         sub_pts = new_points[sub_idx]
+        #         k = min(16, len(sub_pts))
+        #         kdt = cKDTree(sub_pts)
+        #         _, nn = kdt.query(sub_pts, k=k)
+        #         Xs = sub_pts.copy()
+        #         for _ in range(anomlay_cfg.smooth_steps):
+        #             nbr_mean = Xs[nn].mean(axis=1)
+        #             Xs = Xs + anomlay_cfg.smooth_lambda * (nbr_mean - Xs)
+        #         new_points[sub_idx] = Xs
 
         return new_points
 

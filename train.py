@@ -12,7 +12,8 @@ from tensorboardX import SummaryWriter
 import tools.log as log
 from config.config_train import get_parser
 
-from datasets.AnomalyShapeNet.dataset_preprocess import shared_cfg
+# from datasets.AnomalyShapeNet.dataset_preprocess import shared_cfg
+from datasets.AnomalyShapeNet.dataset_preprocess import param_queue
 
 
 # Epoch counts from 0 to N-1
@@ -36,15 +37,19 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
     end_time = time.time()  # initialization
     am_dict = {}
 
-    # Where to change the anomaly synthetisis parameters
-    if epoch >= 0:
-        epoch_frame = {
-            'beta': np.random.uniform(0.06, 0.12, cfg.num_works)
-        }
-        shared_cfg['frame'] = epoch_frame  # single atomic-ish write
+    # create a single iterator; do NOT also iterate over train_loader
+    data_iter = iter(train_loader)
 
     # #start train
-    for i, batch in enumerate(train_loader):
+    for i in range(max_batch_iter):
+        # ---- 1) Choose beta for THIS batch and push to queue BEFORE fetching batch
+        # or your scheduler/policy value
+        beta = float(np.random.uniform(0.06, 0.12))
+        param_queue.put({'beta': beta})
+
+        # ---- 2) Now fetch the batch; collate_fn will pop the beta and synthesize with it
+        batch = next(data_iter)   # blocks until a worker returns a batch
+
         torch.cuda.empty_cache()
         batch_time.update(time.time() - end_time)  # update time
 
@@ -63,6 +68,7 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
                 am_dict[k] = log.AverageMeter()
             am_dict[k].update(v[0], v[1])
 
+        # This is for logging only
         current_iter = (epoch-1) * len(train_loader) + i + 1
         max_iter = cfg.epochs * len(train_loader)
         remain_iter = max_iter - current_iter
