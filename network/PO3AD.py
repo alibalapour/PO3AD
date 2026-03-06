@@ -6,11 +6,68 @@ import numpy as np
 import open3d as o3d
 
 
-class PONet(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(PONet, self).__init__()
-        self.backbone = unet3d(in_channels=in_channels, out_channels=out_channels, arch='MinkUNet34C')
-        self.linear_offset = nn.Sequential(
+class MultiHeadOffsetPredictor(nn.Module):
+    """Multi-head offset predictor with separate heads for each coordinate.
+
+    Instead of predicting all 3 coordinates from a single MLP, this module
+    uses separate prediction heads for x, y, and z offsets. This allows
+    each head to specialize in predicting one coordinate direction.
+    """
+    def __init__(self, in_dim, hidden_dim=32, num_layers=2, dropout=0.0):
+        super(MultiHeadOffsetPredictor, self).__init__()
+
+        # Shared feature transformation
+        self.shared = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim),
+            nn.PReLU(),
+        )
+
+        # Separate heads for x, y, z
+        self.head_x = self._make_head(hidden_dim, num_layers, dropout)
+        self.head_y = self._make_head(hidden_dim, num_layers, dropout)
+        self.head_z = self._make_head(hidden_dim, num_layers, dropout)
+
+    def _make_head(self, hidden_dim, num_layers, dropout):
+        num_layers = max(1, num_layers)
+        layers = []
+        for i in range(num_layers - 1):
+            layers.extend([
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+                nn.BatchNorm1d(hidden_dim),
+                nn.PReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+            ])
+        layers.append(nn.Linear(hidden_dim, 1, bias=True))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        shared_feat = self.shared(x)
+        offset_x = self.head_x(shared_feat)
+        offset_y = self.head_y(shared_feat)
+        offset_z = self.head_z(shared_feat)
+        return torch.cat([offset_x, offset_y, offset_z], dim=-1)
+
+
+def create_offset_head(variant, out_channels, hidden_dim=64, num_layers=3,
+                       dropout=0.0):
+    """Factory function to create offset prediction head based on variant type.
+
+    Args:
+        variant (str): Architecture variant name. Options:
+            - 'baseline': Original 3-layer MLP (out_ch -> 16 -> 3)
+            - 'multi_head': Separate prediction heads for x, y, z
+        out_channels (int): Output dimension from backbone (input to head)
+        hidden_dim (int): Hidden layer dimension for multi_head variant
+        num_layers (int): Number of layers for multi_head variant
+        dropout (float): Dropout probability for regularization
+
+    Returns:
+        nn.Module: The offset prediction head module
+    """
+    if variant == 'baseline':
+        # Original architecture: simple 3-layer MLP
+        return nn.Sequential(
             nn.Linear(out_channels, out_channels, bias=False),
             nn.BatchNorm1d(out_channels),
             nn.PReLU(),
@@ -18,6 +75,50 @@ class PONet(nn.Module):
             nn.BatchNorm1d(16),
             nn.PReLU(),
             nn.Linear(16, 3, bias=True)
+        )
+
+    elif variant == 'multi_head':
+        # Multi-head architecture with separate heads for x, y, z
+        return MultiHeadOffsetPredictor(
+            in_dim=out_channels,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+
+    else:
+        raise ValueError(f"Unknown offset head variant: {variant}. "
+                        f"Options: baseline, multi_head")
+
+
+class PONet(nn.Module):
+    """Point Offset Network for 3D anomaly detection.
+
+    Args:
+        in_channels (int): Input feature dimension (typically 3 for xyz normals)
+        out_channels (int): Backbone output feature dimension
+        offset_head_variant (str): Architecture variant for offset prediction head
+        offset_hidden_dim (int): Hidden dimension for offset head
+        offset_num_layers (int): Number of layers in offset head
+        offset_dropout (float): Dropout probability in offset head
+    """
+    def __init__(self, in_channels, out_channels,
+                 offset_head_variant='baseline',
+                 offset_hidden_dim=64,
+                 offset_num_layers=3,
+                 offset_dropout=0.0):
+        super(PONet, self).__init__()
+
+        self.offset_head_variant = offset_head_variant
+
+        self.backbone = unet3d(in_channels=in_channels, out_channels=out_channels, arch='MinkUNet34C')
+
+        self.linear_offset = create_offset_head(
+            variant=offset_head_variant,
+            out_channels=out_channels,
+            hidden_dim=offset_hidden_dim,
+            num_layers=offset_num_layers,
+            dropout=offset_dropout,
         )
 
         self.weight_initialization()
