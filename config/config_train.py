@@ -35,6 +35,17 @@ def get_parser():
     parser.add_argument('--in_channels', type=int, default=3, help='in channels')
     parser.add_argument('--out_channels', type=int, default=32, help='backbone feat channels')
 
+    # #offset head ablation parameters
+    parser.add_argument('--offset_head_variant', type=str, default='baseline',
+                        choices=['baseline', 'multi_head'],
+                        help='Offset prediction head variant (baseline or multi_head)')
+    parser.add_argument('--offset_hidden_dim', type=int, default=64,
+                        help='Hidden dimension for offset head (used by multi_head)')
+    parser.add_argument('--offset_num_layers', type=int, default=3,
+                        help='Number of layers in offset head (used by multi_head)')
+    parser.add_argument('--offset_dropout', type=float, default=0.0,
+                        help='Dropout probability in offset head')
+
 
     args = parser.parse_args()
     return args

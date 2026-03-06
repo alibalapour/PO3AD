@@ -98,7 +98,11 @@ def SingleCard_training(cfgs):
     from network.PO3AD import model_fn
     use_cuda = torch.cuda.is_available()
     assert use_cuda
-    model = net(cfg.in_channels, cfg.out_channels)
+    model = net(cfg.in_channels, cfg.out_channels,
+                offset_head_variant=cfg.offset_head_variant,
+                offset_hidden_dim=cfg.offset_hidden_dim,
+                offset_num_layers=cfg.offset_num_layers,
+                offset_dropout=cfg.offset_dropout)
     model = model.cuda()
 
     logger.info('#Model parameters: {}'.format(sum([x.nelement() for x in model.parameters()])))
